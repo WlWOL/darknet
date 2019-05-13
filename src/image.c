@@ -4,7 +4,7 @@
 #include "cuda.h"
 #include <stdio.h>
 #include <math.h>
-
+#include "highgui.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -238,8 +238,50 @@ image **load_alphabet()
 
 void draw_detections(image im, detection *dets, int num, float thresh, char **names, image **alphabet, int classes)
 {
-    int i,j;
+    int i,j;        //num代表有几个框框，j用来选出class，dets[i].prob[j]
+                    //dets[i]为第i个框框
+                    //原函数只有画框，因为截图会被画框干扰（如果两个框重合的话，后截图的那个框会有紫色条子），所以分为两个循环进行
+                    //
+///循环一，先截图
+    for(i = 0; i < num; ++i){
+        int class = -1;
 
+        for(j = 0; j < classes; ++j)        //选出class
+        {
+            if (dets[i].prob[j] > thresh){
+                if (class < 0) {
+                    class = j;
+                }
+            }
+        }
+
+        if(class >= 0){
+            box b = dets[i].bbox;
+            int left  = (b.x-b.w/2.)*im.w;
+            int right = (b.x+b.w/2.)*im.w;
+            int top   = (b.y-b.h/2.)*im.h;
+            int bot   = (b.y+b.h/2.)*im.h;
+
+            if(left < 0) left = 0;
+            if(right > im.w-1) right = im.w-1;
+            if(top < 0) top = 0;
+            if(bot > im.h-1) bot = im.h-1;
+
+            //////////////////////////自添加用于裁剪图片
+            int the_class = class;
+            float cut_pro = dets[i].prob[class]*100;
+            printf("\ncut_class:%s  ...........class_pro:%.0f%% \n", names[the_class], cut_pro);
+            int pre_x = left;
+            int pre_y = top;
+            int pre_h = bot - top;
+            int pre_w = right - left;
+            save_cut_image(pre_x, pre_y, pre_h, pre_w, i, im, names, cut_pro, the_class);
+            printf("/************  cut and save over *****************/ \n\n");
+            //////////////////////////
+        }
+    }
+
+///循环二，画框+生成labestr
     for(i = 0; i < num; ++i){
         char labelstr[4096] = {0};
         int class = -1;
@@ -252,44 +294,45 @@ void draw_detections(image im, detection *dets, int num, float thresh, char **na
                     strcat(labelstr, ", ");
                     strcat(labelstr, names[j]);
                 }
+                /////这一段是自己加的，实现图片标签旁边显示预测概率  如person:98%
+                char prob[4];
+                int pr=(int)(dets[i].prob[j] * 100);
+                int ii=1;
+                if (pr==100)ii=2;
+                while(pr)
+                {
+                prob[ii--]=pr%10+'0';
+                pr=pr/10;
+                }
+                strcat(labelstr,":");
+                strcat(labelstr,prob);
+                strcat(labelstr,"%");
+                
+                ///////////////////////////////////////////////
+                
+                
                 printf("%s: %.0f%%\n", names[j], dets[i].prob[j]*100);
             }
         }
         if(class >= 0){
             int width = im.h * .006;
-
-            /*
-               if(0){
-               width = pow(prob, 1./2.)*10+1;
-               alphabet = 0;
-               }
-             */
-
-            //printf("%d %s: %.0f%%\n", i, names[class], prob*100);
             int offset = class*123457 % classes;
             float red = get_color(2,offset,classes);
             float green = get_color(1,offset,classes);
             float blue = get_color(0,offset,classes);
             float rgb[3];
-
-            //width = prob*20+2;
-
             rgb[0] = red;
             rgb[1] = green;
             rgb[2] = blue;
             box b = dets[i].bbox;
-            //printf("%f %f %f %f\n", b.x, b.y, b.w, b.h);
-
             int left  = (b.x-b.w/2.)*im.w;
             int right = (b.x+b.w/2.)*im.w;
             int top   = (b.y-b.h/2.)*im.h;
             int bot   = (b.y+b.h/2.)*im.h;
-
             if(left < 0) left = 0;
             if(right > im.w-1) right = im.w-1;
             if(top < 0) top = 0;
             if(bot > im.h-1) bot = im.h-1;
-
             draw_box_width(im, left, top, right, bot, width, red, green, blue);
             if (alphabet) {
                 image label = get_label(alphabet, labelstr, (im.h*.03));
@@ -307,6 +350,10 @@ void draw_detections(image im, detection *dets, int num, float thresh, char **na
             }
         }
     }
+
+
+
+
 }
 
 void transpose_image(image im)
@@ -1463,4 +1510,30 @@ void free_image(image m)
     if(m.data){
         free(m.data);
     }
+}
+
+void save_cut_image(int px, int py, int ph, int pw, int no, image m_img, char **names, float cut_pro, int the_class)
+{
+	image copy = copy_image(m_img);
+	if (m_img.c == 3) rgbgr_image(copy);
+	int x, y, k;
+	char buff[256];
+	sprintf(buff, "results//%s%.0f%%%d.jpg", names[the_class], cut_pro, no);
+	printf(" cut_class  :%s  ...........cut_class:%.0f \n", names[the_class], cut_pro);
+	IplImage *disp = cvCreateImage(cvSize(m_img.w, m_img.h), IPL_DEPTH_8U, m_img.c);
+	int step = disp->widthStep;
+	for (y = 0; y < m_img.h; ++y) {
+		for (x = 0; x < m_img.w; ++x) {
+			for (k = 0; k < m_img.c; ++k) {
+				disp->imageData[y*step + x*m_img.c + k] = (unsigned char)(get_pixel(copy, x, y, k) * 255);
+			}
+		}
+	}
+	CvMat *pMat = cvCreateMatHeader(m_img.w, m_img.h, IPL_DEPTH_8U);
+	CvRect rect = cvRect(px, py, pw, ph);
+	cvGetSubRect(disp, pMat, rect);
+	IplImage *pSubImg = cvCreateImage(cvSize(pw, ph), IPL_DEPTH_8U, m_img.c);
+	cvGetImage(pMat, pSubImg);
+	cvSaveImage(buff, pSubImg, 0);
+	free_image(copy);
 }
